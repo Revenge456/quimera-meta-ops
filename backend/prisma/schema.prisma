@@ -1,0 +1,400 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  admin
+  commercial_manager
+}
+
+enum ClientStatus {
+  active
+  inactive
+  archived
+}
+
+enum LogLevel {
+  debug
+  info
+  warn
+  error
+}
+
+enum SyncStatus {
+  running
+  success
+  failed
+}
+
+enum SyncType {
+  initial
+  incremental
+}
+
+enum AiAnalysisLevel {
+  campaign
+  ad_set
+  ad
+}
+
+model User {
+  id                                String                      @id @default(cuid())
+  email                             String                      @unique
+  nombre                            String
+  passwordHash                      String                      @map("password_hash")
+  role                              UserRole
+  active                            Boolean                     @default(true)
+  assignments                       ClientAssignment[]
+  strategistAnalysesGenerated       AiStrategistAnalysis[]      @relation("StrategistAnalysisGeneratedBy")
+  commercialAdvisorAnalysesGenerated CommercialAdvisorAnalysis[] @relation("CommercialAdvisorAnalysisGeneratedBy")
+  createdAt                         DateTime                    @default(now()) @map("created_at")
+  updatedAt                         DateTime                    @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model Client {
+  id                        String                     @id @default(cuid())
+  nombre                    String
+  empresa                   String
+  estado                    ClientStatus               @default(active)
+  metaAdAccountIds          String[]                   @default([]) @map("meta_ad_account_ids")
+  assignments               ClientAssignment[]
+  adAccounts                AdAccount[]
+  syncLogs                  SyncLog[]
+  strategistAnalyses        AiStrategistAnalysis[]
+  commercialAdvisorAnalyses CommercialAdvisorAnalysis[]
+  createdAt                 DateTime                   @default(now()) @map("created_at")
+  updatedAt                 DateTime                   @updatedAt @map("updated_at")
+
+  @@map("clientes")
+}
+
+model ClientAssignment {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  clienteId String   @map("cliente_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client    Client   @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([userId, clienteId])
+  @@index([clienteId])
+  @@map("cliente_assignments")
+}
+
+model SystemLog {
+  id           String   @id @default(cuid())
+  level        LogLevel
+  module       String
+  eventName    String   @map("event_name")
+  message      String
+  metadataJson Json?    @map("metadata_json")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([module])
+  @@map("system_logs")
+}
+
+model SyncLog {
+  id            String      @id @default(cuid())
+  clienteId     String      @map("cliente_id")
+  adAccountId   String?     @map("ad_account_id")
+  syncType      SyncType    @map("sync_type")
+  status        SyncStatus
+  startedAt     DateTime    @default(now()) @map("started_at")
+  completedAt   DateTime?   @map("completed_at")
+  durationMs    Int?        @map("duration_ms")
+  rowsUpserted  Int         @default(0) @map("rows_upserted")
+  apiCallsUsed  Int         @default(0) @map("api_calls_used")
+  errorMessage  String?     @map("error_message")
+  metadataJson  Json?       @map("metadata_json")
+  client        Client      @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  adAccount     AdAccount?  @relation(fields: [adAccountId], references: [id], onDelete: SetNull)
+
+  @@index([clienteId])
+  @@index([adAccountId])
+  @@index([status])
+  @@index([startedAt])
+  @@map("sync_log")
+}
+
+model AdAccount {
+  id           String     @id @default(cuid())
+  clienteId    String     @map("cliente_id")
+  metaAccountId String    @unique @map("meta_account_id")
+  name         String
+  currency     String?
+  timezone     String?
+  status       String?
+  amountSpent  Decimal?   @db.Decimal(18, 2) @map("amount_spent")
+  lastSyncedAt DateTime?  @map("last_synced_at")
+  rawJson      Json?      @map("raw_json")
+  client       Client     @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  campaigns    Campaign[]
+  syncLogs      SyncLog[]
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  @@index([clienteId])
+  @@index([status])
+  @@map("ad_accounts")
+}
+
+model Campaign {
+  id               String    @id @default(cuid())
+  adAccountId      String    @map("ad_account_id")
+  metaCampaignId   String    @unique @map("meta_campaign_id")
+  name             String
+  objective        String?
+  buyingType       String?   @map("buying_type")
+  budgetFields     Json?     @map("budget_fields")
+  effectiveStatus  String?   @map("effective_status")
+  configuredStatus String?   @map("configured_status")
+  startTime        DateTime? @map("start_time")
+  stopTime         DateTime? @map("stop_time")
+  rawJson          Json?     @map("raw_json")
+  adAccount        AdAccount @relation(fields: [adAccountId], references: [id], onDelete: Cascade)
+  adSets           AdSet[]
+  ads              Ad[]
+  insightsDaily    CampaignInsightDaily[]
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([adAccountId])
+  @@index([effectiveStatus])
+  @@map("campaigns")
+}
+
+model AdSet {
+  id               String    @id @default(cuid())
+  campaignId       String    @map("campaign_id")
+  metaAdsetId      String    @unique @map("meta_adset_id")
+  name             String
+  optimizationGoal String?   @map("optimization_goal")
+  billingEvent     String?   @map("billing_event")
+  bidStrategy      String?   @map("bid_strategy")
+  targetingJson    Json?     @map("targeting_json")
+  effectiveStatus  String?   @map("effective_status")
+  startTime        DateTime? @map("start_time")
+  stopTime         DateTime? @map("stop_time")
+  rawJson          Json?     @map("raw_json")
+  campaign         Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  ads              Ad[]
+  insightsDaily    AdSetInsightDaily[]
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([campaignId])
+  @@index([effectiveStatus])
+  @@map("ad_sets")
+}
+
+model Ad {
+  id               String       @id @default(cuid())
+  adsetId          String       @map("adset_id")
+  campaignId       String       @map("campaign_id")
+  metaAdId         String       @unique @map("meta_ad_id")
+  name             String
+  effectiveStatus  String?      @map("effective_status")
+  configuredStatus String?      @map("configured_status")
+  creativeId       String?      @map("creative_id")
+  previewData      Json?        @map("preview_data")
+  rawJson          Json?        @map("raw_json")
+  adSet            AdSet        @relation(fields: [adsetId], references: [id], onDelete: Cascade)
+  campaign         Campaign     @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  creatives        AdCreative[]
+  insightsDaily    AdInsightDaily[]
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  @@index([adsetId])
+  @@index([campaignId])
+  @@index([effectiveStatus])
+  @@map("ads")
+}
+
+model AdCreative {
+  id            String   @id @default(cuid())
+  adId          String   @map("ad_id")
+  metaCreativeId String  @unique @map("meta_creative_id")
+  name          String?
+  body          String?
+  headline      String?
+  callToAction  String?  @map("call_to_action")
+  assetType     String?  @map("asset_type")
+  assetUrl      String?  @map("asset_url")
+  thumbnailUrl  String?  @map("thumbnail_url")
+  landingUrl    String?  @map("landing_url")
+  rawJson       Json?    @map("raw_json")
+  ad            Ad       @relation(fields: [adId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@index([adId])
+  @@map("ad_creatives")
+}
+
+model CampaignInsightDaily {
+  id               String    @id @default(cuid())
+  date             DateTime  @db.Date
+  campaignId       String    @map("campaign_id")
+  spend            Decimal?  @db.Decimal(18, 2)
+  impressions      Int?
+  reach            Int?
+  frequency        Decimal?  @db.Decimal(18, 4)
+  clicks           Int?
+  linkClicks       Int?      @map("link_clicks")
+  landingPageViews Int?      @map("landing_page_views")
+  cpm              Decimal?  @db.Decimal(18, 4)
+  cpc              Decimal?  @db.Decimal(18, 4)
+  ctr              Decimal?  @db.Decimal(18, 4)
+  results          Decimal?  @db.Decimal(18, 4)
+  resultType       String?   @map("result_type")
+  costPerResult    Decimal?  @db.Decimal(18, 4) @map("cost_per_result")
+  leads            Decimal?  @db.Decimal(18, 4)
+  purchases        Decimal?  @db.Decimal(18, 4)
+  purchaseValue    Decimal?  @db.Decimal(18, 4) @map("purchase_value")
+  roas             Decimal?  @db.Decimal(18, 4)
+  actionsJson      Json?     @map("actions_json")
+  actionValuesJson Json?     @map("action_values_json")
+  videoMetricsJson Json?     @map("video_metrics_json")
+  rawJson          Json?     @map("raw_json")
+  campaign         Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@unique([campaignId, date])
+  @@index([date])
+  @@index([campaignId])
+  @@map("campaign_insights_daily")
+}
+
+model AdSetInsightDaily {
+  id               String    @id @default(cuid())
+  date             DateTime  @db.Date
+  adSetId          String    @map("adset_id")
+  spend            Decimal?  @db.Decimal(18, 2)
+  impressions      Int?
+  reach            Int?
+  frequency        Decimal?  @db.Decimal(18, 4)
+  clicks           Int?
+  linkClicks       Int?      @map("link_clicks")
+  landingPageViews Int?      @map("landing_page_views")
+  cpm              Decimal?  @db.Decimal(18, 4)
+  cpc              Decimal?  @db.Decimal(18, 4)
+  ctr              Decimal?  @db.Decimal(18, 4)
+  results          Decimal?  @db.Decimal(18, 4)
+  resultType       String?   @map("result_type")
+  costPerResult    Decimal?  @db.Decimal(18, 4) @map("cost_per_result")
+  leads            Decimal?  @db.Decimal(18, 4)
+  purchases        Decimal?  @db.Decimal(18, 4)
+  purchaseValue    Decimal?  @db.Decimal(18, 4) @map("purchase_value")
+  roas             Decimal?  @db.Decimal(18, 4)
+  actionsJson      Json?     @map("actions_json")
+  actionValuesJson Json?     @map("action_values_json")
+  videoMetricsJson Json?     @map("video_metrics_json")
+  rawJson          Json?     @map("raw_json")
+  adSet            AdSet     @relation(fields: [adSetId], references: [id], onDelete: Cascade)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@unique([adSetId, date])
+  @@index([date])
+  @@index([adSetId])
+  @@map("adset_insights_daily")
+}
+
+model AdInsightDaily {
+  id               String    @id @default(cuid())
+  date             DateTime  @db.Date
+  adId             String    @map("ad_id")
+  spend            Decimal?  @db.Decimal(18, 2)
+  impressions      Int?
+  reach            Int?
+  frequency        Decimal?  @db.Decimal(18, 4)
+  clicks           Int?
+  linkClicks       Int?      @map("link_clicks")
+  landingPageViews Int?      @map("landing_page_views")
+  cpm              Decimal?  @db.Decimal(18, 4)
+  cpc              Decimal?  @db.Decimal(18, 4)
+  ctr              Decimal?  @db.Decimal(18, 4)
+  results          Decimal?  @db.Decimal(18, 4)
+  resultType       String?   @map("result_type")
+  costPerResult    Decimal?  @db.Decimal(18, 4) @map("cost_per_result")
+  leads            Decimal?  @db.Decimal(18, 4)
+  purchases        Decimal?  @db.Decimal(18, 4)
+  purchaseValue    Decimal?  @db.Decimal(18, 4) @map("purchase_value")
+  roas             Decimal?  @db.Decimal(18, 4)
+  actionsJson      Json?     @map("actions_json")
+  actionValuesJson Json?     @map("action_values_json")
+  videoMetricsJson Json?     @map("video_metrics_json")
+  rawJson          Json?     @map("raw_json")
+  ad               Ad        @relation(fields: [adId], references: [id], onDelete: Cascade)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@unique([adId, date])
+  @@index([date])
+  @@index([adId])
+  @@map("ad_insights_daily")
+}
+
+model AiStrategistAnalysis {
+  id                        String                     @id @default(cuid())
+  clientId                  String                     @map("client_id")
+  generatedByUserId         String?                    @map("generated_by_user_id")
+  level                     AiAnalysisLevel
+  dateFrom                  DateTime                   @db.Date @map("date_from")
+  dateTo                    DateTime                   @db.Date @map("date_to")
+  contextHash               String?                    @map("context_hash")
+  filtersJson               Json?                      @map("filters_json")
+  contextNormalizedJson     Json?                      @map("context_normalized_json")
+  outputJson                Json                       @map("output_json")
+  contextJson               Json?                      @map("context_json")
+  generatedAt               DateTime                   @default(now()) @map("generated_at")
+  client                    Client                     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  generatedBy               User?                      @relation("StrategistAnalysisGeneratedBy", fields: [generatedByUserId], references: [id], onDelete: SetNull)
+  commercialAdvisorAnalyses CommercialAdvisorAnalysis[]
+
+  @@index([clientId])
+  @@index([generatedByUserId])
+  @@index([level])
+  @@index([generatedAt])
+  @@index([dateFrom, dateTo])
+  @@index([contextHash])
+  @@map("ai_strategist_analyses")
+}
+
+model CommercialAdvisorAnalysis {
+  id                 String               @id @default(cuid())
+  clientId           String               @map("client_id")
+  strategistAnalysisId String?            @map("strategist_analysis_id")
+  generatedByUserId  String?              @map("generated_by_user_id")
+  level              AiAnalysisLevel
+  dateFrom           DateTime             @db.Date @map("date_from")
+  dateTo             DateTime             @db.Date @map("date_to")
+  contextHash        String?              @map("context_hash")
+  filtersJson        Json?                @map("filters_json")
+  contextNormalizedJson Json?             @map("context_normalized_json")
+  outputJson         Json                 @map("output_json")
+  strategistOutputJson Json?              @map("strategist_output_json")
+  generatedAt        DateTime             @default(now()) @map("generated_at")
+  client             Client               @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  strategistAnalysis AiStrategistAnalysis? @relation(fields: [strategistAnalysisId], references: [id], onDelete: SetNull)
+  generatedBy        User?                @relation("CommercialAdvisorAnalysisGeneratedBy", fields: [generatedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([clientId])
+  @@index([strategistAnalysisId])
+  @@index([generatedByUserId])
+  @@index([level])
+  @@index([generatedAt])
+  @@index([dateFrom, dateTo])
+  @@index([contextHash])
+  @@map("commercial_advisor_analyses")
+}
