@@ -19,6 +19,8 @@ export class AiLlmService {
     const provider = this.configService.get<string>('AI_LLM_PROVIDER') ?? 'openai';
 
     switch (provider) {
+      case 'claude':
+        return this.generateWithClaude(params);
       case 'openai':
         return this.generateWithOpenAi(params);
       default:
@@ -117,6 +119,122 @@ export class AiLlmService {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private async generateWithClaude(params: {
+    systemPrompt: string;
+    userPrompt: string;
+    schemaName: string;
+    schema: Record<string, unknown>;
+    maxOutputTokens?: number;
+  }) {
+    const apiKey = this.configService.get<string>('ANTHROPIC_API_KEY');
+    if (!apiKey) {
+      throw new ServiceUnavailableException('ANTHROPIC_API_KEY no configurada');
+    }
+
+    const model =
+      this.configService.get<string>('ANTHROPIC_MODEL') ?? 'claude-sonnet-4-5';
+    const anthropicVersion =
+      this.configService.get<string>('ANTHROPIC_VERSION') ?? '2023-06-01';
+    const timeoutMs = Number(
+      this.configService.get<string>('AI_LLM_TIMEOUT_MS') ?? '45000',
+    );
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': anthropicVersion,
+        },
+        body: JSON.stringify({
+          model,
+          system: params.systemPrompt,
+          max_tokens: params.maxOutputTokens ?? 2400,
+          messages: [
+            {
+              role: 'user',
+              content: params.userPrompt,
+            },
+          ],
+          tools: [
+            {
+              name: params.schemaName,
+              description:
+                'Return the final answer as structured JSON that strictly matches the provided schema.',
+              input_schema: params.schema,
+              strict: true,
+            },
+          ],
+          tool_choice: {
+            type: 'tool',
+            name: params.schemaName,
+          },
+        }),
+        signal: controller.signal,
+      });
+
+      const payload = (await response.json()) as Record<string, unknown>;
+
+      if (!response.ok) {
+        throw new BadGatewayException(
+          `Claude devolvio un error: ${JSON.stringify(payload)}`,
+        );
+      }
+
+      return this.extractClaudeStructuredJson(payload);
+    } catch (error) {
+      if (error instanceof BadGatewayException) {
+        throw error;
+      }
+
+      throw new BadGatewayException(
+        error instanceof Error
+          ? `Fallo al consultar Claude: ${error.message}`
+          : 'Fallo desconocido al consultar Claude',
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private extractClaudeStructuredJson(payload: Record<string, unknown>) {
+    const content = Array.isArray(payload.content)
+      ? (payload.content as unknown[])
+      : [];
+
+    for (const block of content) {
+      if (!block || typeof block !== 'object') {
+        continue;
+      }
+
+      const typedBlock = block as {
+        type?: unknown;
+        input?: unknown;
+        text?: unknown;
+      };
+
+      if (typedBlock.type === 'tool_use' && typedBlock.input) {
+        return typedBlock.input;
+      }
+
+      if (typedBlock.type === 'text' && typeof typedBlock.text === 'string') {
+        try {
+          return JSON.parse(typedBlock.text);
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    throw new BadGatewayException(
+      'Claude no devolvio un bloque tool_use o JSON utilizable',
+    );
   }
 
   private extractText(payload: Record<string, unknown>) {
