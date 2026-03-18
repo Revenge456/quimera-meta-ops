@@ -1,7 +1,26 @@
+import 'dotenv/config';
+
+import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient, UserRole } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import { Pool } from 'pg';
 
-const prisma = new PrismaClient();
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+  throw new Error('DATABASE_URL es requerida para ejecutar el seed');
+}
+
+const prisma = new PrismaClient({
+  adapter: new PrismaPg(
+    new Pool({
+      connectionString: removeSslModeParam(connectionString),
+      ssl: {
+        rejectUnauthorized: false,
+      },
+    }),
+  ),
+});
 
 async function main() {
   const adminPasswordHash = await bcrypt.hash('admin123456', 10);
@@ -166,3 +185,9 @@ main()
   .finally(async () => {
     await prisma.$disconnect();
   });
+
+function removeSslModeParam(value: string) {
+  const url = new URL(value);
+  url.searchParams.delete('sslmode');
+  return url.toString();
+}
