@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -9,6 +8,7 @@ import { Prisma, SyncStatus, SyncType } from '@prisma/client';
 
 import { InsightsRepository } from '../../insights/data/insights.repository';
 import { SystemLogService } from '../../logging/application/system-log.service';
+import { MetaConnectionsService } from '../../meta-connections/application/meta-connections.service';
 import type { AuthUser } from '../../shared/types/auth-user.type';
 import { SyncLockService } from '../domain/sync-lock.service';
 import { MetaAdsClient, type MetaInsightRow } from '../integration/meta-ads.client';
@@ -25,6 +25,7 @@ export class SyncEngineService {
     private readonly repository: SyncRepository,
     private readonly insightsRepository: InsightsRepository,
     private readonly metaAdsClient: MetaAdsClient,
+    private readonly metaConnectionsService: MetaConnectionsService,
     private readonly systemLogService: SystemLogService,
     private readonly syncLockService: SyncLockService,
   ) {}
@@ -38,27 +39,24 @@ export class SyncEngineService {
       throw new ForbiddenException();
     }
 
-    const client = await this.repository.getClientForSync(clientId);
-    if (client.metaAdAccountIds.length === 0) {
-      throw new BadRequestException(
-        'El cliente no tiene meta_ad_account_ids configurados',
-      );
-    }
+    const resolution =
+      await this.metaConnectionsService.resolveSyncTargetsForClient(clientId);
 
     const results = [];
-    for (const metaAdAccountId of client.metaAdAccountIds) {
+    for (const target of resolution.targets) {
       results.push(
         await this.syncSingleAccount({
-          clientId: client.id,
-          clientName: client.nombre,
-          metaAdAccountId,
+          clientId: resolution.clientId,
+          clientName: resolution.clientName,
+          metaAdAccountId: target.metaAdAccountId,
+          credential: target.credential,
           syncType,
         }),
       );
     }
 
     return {
-      clientId: client.id,
+      clientId: resolution.clientId,
       syncType,
       accounts: results,
     };
@@ -68,6 +66,11 @@ export class SyncEngineService {
     clientId: string;
     clientName: string;
     metaAdAccountId: string;
+    credential: {
+      accessToken: string;
+      source: 'client_connection' | 'global_fallback';
+      connectionId?: string;
+    };
     syncType: SyncType;
   }) {
     const lockKey = `${params.clientId}:${params.metaAdAccountId}`;
@@ -80,10 +83,12 @@ export class SyncEngineService {
     const startedAt = new Date();
     const syncLog = await this.repository.createSyncLog({
       clienteId: params.clientId,
+      metaConnectionId: params.credential.connectionId,
       syncType: params.syncType,
       metadataJson: {
         clientName: params.clientName,
         metaAdAccountId: params.metaAdAccountId,
+        credentialSource: params.credential.source,
       },
     });
 
@@ -99,11 +104,13 @@ export class SyncEngineService {
 
       const adAccountResponse = await this.metaAdsClient.getAdAccount(
         params.metaAdAccountId,
+        params.credential,
       );
       apiCallsUsed += adAccountResponse.apiCallsUsed;
 
       const adAccount = await this.repository.upsertAdAccount({
         clienteId: params.clientId,
+        metaConnectionId: params.credential.connectionId,
         metaAccountId: adAccountResponse.row.id,
         name: adAccountResponse.row.name,
         currency: adAccountResponse.row.currency,
@@ -116,6 +123,7 @@ export class SyncEngineService {
 
       const campaignsResponse = await this.metaAdsClient.listCampaigns(
         params.metaAdAccountId,
+        params.credential,
         updatedSince,
       );
       apiCallsUsed += campaignsResponse.apiCallsUsed;
@@ -153,6 +161,7 @@ export class SyncEngineService {
 
         const adSetsResponse = await this.metaAdsClient.listAdSets(
           campaign.id,
+          params.credential,
           updatedSince,
         );
         apiCallsUsed += adSetsResponse.apiCallsUsed;
@@ -178,6 +187,7 @@ export class SyncEngineService {
 
       const adsResponse = await this.metaAdsClient.listAds(
         params.metaAdAccountId,
+        params.credential,
         updatedSince,
       );
       apiCallsUsed += adsResponse.apiCallsUsed;
@@ -220,6 +230,7 @@ export class SyncEngineService {
       for (const [metaCreativeId, adId] of creativeToAd.entries()) {
         const creativeResponse = await this.metaAdsClient.getCreative(
           metaCreativeId,
+          params.credential,
         );
         apiCallsUsed += creativeResponse.apiCallsUsed;
 
@@ -242,6 +253,7 @@ export class SyncEngineService {
 
       await this.repository.updateSyncLog(syncLog.id, {
         adAccountId: adAccount.id,
+        metaConnectionId: params.credential.connectionId,
         status: SyncStatus.success,
         rowsUpserted,
         apiCallsUsed,
@@ -249,8 +261,16 @@ export class SyncEngineService {
         metadataJson: {
           metaAdAccountId: params.metaAdAccountId,
           syncType: params.syncType,
+          credentialSource: params.credential.source,
+          connectionId: params.credential.connectionId,
         },
       });
+
+      if (params.credential.connectionId) {
+        await this.metaConnectionsService.touchConnectionLastSync(
+          params.credential.connectionId,
+        );
+      }
 
       await this.systemLogService.log({
         level: 'info',
@@ -263,6 +283,8 @@ export class SyncEngineService {
           syncType: params.syncType,
           rowsUpserted,
           apiCallsUsed,
+          credentialSource: params.credential.source,
+          connectionId: params.credential.connectionId,
         },
       });
 
@@ -279,6 +301,7 @@ export class SyncEngineService {
 
       await this.repository.updateSyncLog(syncLog.id, {
         adAccountId: undefined,
+        metaConnectionId: params.credential.connectionId,
         status: SyncStatus.failed,
         rowsUpserted,
         apiCallsUsed,
@@ -287,6 +310,8 @@ export class SyncEngineService {
         metadataJson: {
           metaAdAccountId: params.metaAdAccountId,
           syncType: params.syncType,
+          credentialSource: params.credential.source,
+          connectionId: params.credential.connectionId,
         },
       });
 
@@ -300,6 +325,8 @@ export class SyncEngineService {
           metaAdAccountId: params.metaAdAccountId,
           syncType: params.syncType,
           errorMessage,
+          credentialSource: params.credential.source,
+          connectionId: params.credential.connectionId,
         },
       });
 
@@ -328,20 +355,17 @@ export class SyncEngineService {
       throw new ForbiddenException();
     }
 
-    const client = await this.repository.getClientForSync(clientId);
-    if (client.metaAdAccountIds.length === 0) {
-      throw new BadRequestException(
-        'El cliente no tiene meta_ad_account_ids configurados',
-      );
-    }
+    const resolution =
+      await this.metaConnectionsService.resolveSyncTargetsForClient(clientId);
 
     const results = [];
-    for (const metaAdAccountId of client.metaAdAccountIds) {
+    for (const target of resolution.targets) {
       results.push(
         await this.syncInsightsForSingleAccount({
-          clientId: client.id,
-          clientName: client.nombre,
-          metaAdAccountId,
+          clientId: resolution.clientId,
+          clientName: resolution.clientName,
+          metaAdAccountId: target.metaAdAccountId,
+          credential: target.credential,
           syncType,
           dateFrom,
           dateTo,
@@ -350,7 +374,7 @@ export class SyncEngineService {
     }
 
     return {
-      clientId: client.id,
+      clientId: resolution.clientId,
       syncType,
       accounts: results,
     };
@@ -370,6 +394,11 @@ export class SyncEngineService {
     clientId: string;
     clientName: string;
     metaAdAccountId: string;
+    credential: {
+      accessToken: string;
+      source: 'client_connection' | 'global_fallback';
+      connectionId?: string;
+    };
     syncType: SyncType;
     dateFrom?: string;
     dateTo?: string;
@@ -384,11 +413,13 @@ export class SyncEngineService {
     const startedAt = new Date();
     const syncLog = await this.repository.createSyncLog({
       clienteId: params.clientId,
+      metaConnectionId: params.credential.connectionId,
       syncType: params.syncType,
       metadataJson: {
         scope: 'insights_daily',
         clientName: params.clientName,
         metaAdAccountId: params.metaAdAccountId,
+        credentialSource: params.credential.source,
       } as Prisma.InputJsonValue,
     });
 
@@ -438,6 +469,7 @@ export class SyncEngineService {
 
       const campaignInsights = await this.metaAdsClient.listInsights({
         metaAccountId: params.metaAdAccountId,
+        credential: params.credential,
         level: 'campaign',
         since,
         until,
@@ -451,6 +483,7 @@ export class SyncEngineService {
 
       const adSetInsights = await this.metaAdsClient.listInsights({
         metaAccountId: params.metaAdAccountId,
+        credential: params.credential,
         level: 'adset',
         since,
         until,
@@ -464,6 +497,7 @@ export class SyncEngineService {
 
       const adInsights = await this.metaAdsClient.listInsights({
         metaAccountId: params.metaAdAccountId,
+        credential: params.credential,
         level: 'ad',
         since,
         until,
@@ -482,6 +516,7 @@ export class SyncEngineService {
 
       await this.repository.updateSyncLog(syncLog.id, {
         adAccountId: adAccount.id,
+        metaConnectionId: params.credential.connectionId,
         status: SyncStatus.success,
         rowsUpserted,
         apiCallsUsed,
@@ -492,10 +527,18 @@ export class SyncEngineService {
           syncType: params.syncType,
           since,
           until,
+          credentialSource: params.credential.source,
+          connectionId: params.credential.connectionId,
           skippedRows,
           skippedByLevel,
         } as Prisma.InputJsonValue,
       });
+
+      if (params.credential.connectionId) {
+        await this.metaConnectionsService.touchConnectionLastSync(
+          params.credential.connectionId,
+        );
+      }
 
       await this.systemLogService.log({
         level: 'info',
@@ -510,6 +553,8 @@ export class SyncEngineService {
           until,
           rowsUpserted,
           apiCallsUsed,
+          credentialSource: params.credential.source,
+          connectionId: params.credential.connectionId,
           skippedRows,
           skippedByLevel,
         },
@@ -529,6 +574,8 @@ export class SyncEngineService {
             until,
             skippedRows,
             skippedByLevel,
+            credentialSource: params.credential.source,
+            connectionId: params.credential.connectionId,
           },
         });
       }
@@ -549,6 +596,7 @@ export class SyncEngineService {
 
       await this.repository.updateSyncLog(syncLog.id, {
         adAccountId: undefined,
+        metaConnectionId: params.credential.connectionId,
         status: SyncStatus.failed,
         rowsUpserted,
         apiCallsUsed,
@@ -558,6 +606,8 @@ export class SyncEngineService {
           scope: 'insights_daily',
           metaAdAccountId: params.metaAdAccountId,
           syncType: params.syncType,
+          credentialSource: params.credential.source,
+          connectionId: params.credential.connectionId,
         } as Prisma.InputJsonValue,
       });
 
@@ -571,6 +621,8 @@ export class SyncEngineService {
           metaAdAccountId: params.metaAdAccountId,
           syncType: params.syncType,
           errorMessage,
+          credentialSource: params.credential.source,
+          connectionId: params.credential.connectionId,
         },
       });
 

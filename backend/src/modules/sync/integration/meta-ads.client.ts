@@ -19,6 +19,10 @@ type MetaAdAccount = {
   timezone_name?: string;
   account_status?: string | number;
   amount_spent?: string;
+  business?: {
+    id?: string;
+    name?: string;
+  };
 };
 
 type MetaCampaign = {
@@ -103,39 +107,60 @@ export type MetaInsightRow = {
   ad_id?: string;
 };
 
+export type MetaAccessCredential = {
+  accessToken: string;
+  source: 'client_connection' | 'global_fallback';
+  connectionId?: string;
+};
+
 @Injectable()
 export class MetaAdsClient {
   private readonly baseUrl: string;
-  private readonly accessToken: string;
+  private readonly fallbackAccessToken: string;
 
   constructor(private readonly configService: ConfigService) {
     const apiVersion =
       this.configService.get<string>('META_API_VERSION') ?? 'v22.0';
-    this.accessToken =
+    this.fallbackAccessToken =
       this.configService.get<string>('META_ACCESS_TOKEN') ?? '';
     this.baseUrl = `https://graph.facebook.com/${apiVersion}`;
   }
 
-  private ensureConfigured() {
-    if (!this.accessToken || this.accessToken === 'change-me') {
+  getGlobalFallbackCredential(): MetaAccessCredential | null {
+    if (
+      !this.fallbackAccessToken ||
+      this.fallbackAccessToken === 'change-me'
+    ) {
+      return null;
+    }
+
+    return {
+      accessToken: this.fallbackAccessToken,
+      source: 'global_fallback',
+    };
+  }
+
+  private ensureConfigured(accessToken: string) {
+    if (!accessToken || accessToken === 'change-me') {
       throw new InternalServerErrorException(
-        'META_ACCESS_TOKEN no configurado',
+        'No existe un access token de Meta utilizable',
       );
     }
   }
 
   private async request<T>(
     pathOrUrl: string,
+    accessToken: string,
     params?: Record<string, string | number | undefined>,
     attempt = 1,
   ): Promise<T> {
-    this.ensureConfigured();
+    this.ensureConfigured(accessToken);
 
     const isAbsolute = pathOrUrl.startsWith('http');
     const url = new URL(isAbsolute ? pathOrUrl : `${this.baseUrl}/${pathOrUrl}`);
 
     if (!isAbsolute) {
-      url.searchParams.set('access_token', this.accessToken);
+      url.searchParams.set('access_token', accessToken);
       for (const [key, value] of Object.entries(params ?? {})) {
         if (value !== undefined && value !== null && value !== '') {
           url.searchParams.set(key, String(value));
@@ -150,7 +175,7 @@ export class MetaAdsClient {
 
     if (attempt < 3 && response.status >= 500) {
       await new Promise((resolve) => setTimeout(resolve, attempt * 500));
-      return this.request<T>(pathOrUrl, params, attempt + 1);
+      return this.request<T>(pathOrUrl, accessToken, params, attempt + 1);
     }
 
     const errorBody = await response.text();
@@ -161,6 +186,7 @@ export class MetaAdsClient {
 
   private async paginate<T>(
     path: string,
+    accessToken: string,
     params?: Record<string, string | number | undefined>,
   ) {
     let nextPath: string | undefined = path;
@@ -171,6 +197,7 @@ export class MetaAdsClient {
     while (nextPath) {
       const response: MetaListResponse<T> = await this.request<MetaListResponse<T>>(
         nextPath,
+        accessToken,
         nextParams,
       );
       apiCallsUsed += 1;
@@ -185,7 +212,30 @@ export class MetaAdsClient {
     };
   }
 
-  async getAdAccount(metaAccountId: string) {
+  async getConnectionIdentity(credential: MetaAccessCredential) {
+    const row = await this.request<{ id: string; name?: string }>(
+      'me',
+      credential.accessToken,
+      {
+        fields: 'id,name',
+      },
+    );
+
+    return {
+      row,
+      apiCallsUsed: 1,
+    };
+  }
+
+  listAccessibleAdAccounts(credential: MetaAccessCredential) {
+    return this.paginate<MetaAdAccount>('me/adaccounts', credential.accessToken, {
+      fields:
+        'id,account_id,name,currency,timezone_name,account_status,amount_spent,business{id,name}',
+      limit: 100,
+    });
+  }
+
+  async getAdAccount(metaAccountId: string, credential: MetaAccessCredential) {
     const fields = [
       'id',
       'account_id',
@@ -194,11 +244,16 @@ export class MetaAdsClient {
       'timezone_name',
       'account_status',
       'amount_spent',
+      'business{id,name}',
     ].join(',');
 
-    const adAccount = await this.request<MetaAdAccount>(metaAccountId, {
-      fields,
-    });
+    const adAccount = await this.request<MetaAdAccount>(
+      metaAccountId,
+      credential.accessToken,
+      {
+        fields,
+      },
+    );
 
     return {
       row: adAccount,
@@ -206,34 +261,61 @@ export class MetaAdsClient {
     };
   }
 
-  listCampaigns(metaAccountId: string, updatedSince?: string) {
-    return this.paginate<MetaCampaign>(`${metaAccountId}/campaigns`, {
+  listCampaigns(
+    metaAccountId: string,
+    credential: MetaAccessCredential,
+    updatedSince?: string,
+  ) {
+    return this.paginate<MetaCampaign>(
+      `${metaAccountId}/campaigns`,
+      credential.accessToken,
+      {
       fields:
         'id,name,objective,buying_type,daily_budget,lifetime_budget,effective_status,configured_status,start_time,stop_time,updated_time',
       updated_since: updatedSince,
       limit: 100,
-    });
+      },
+    );
   }
 
-  listAdSets(metaCampaignId: string, updatedSince?: string) {
-    return this.paginate<MetaAdSet>(`${metaCampaignId}/adsets`, {
+  listAdSets(
+    metaCampaignId: string,
+    credential: MetaAccessCredential,
+    updatedSince?: string,
+  ) {
+    return this.paginate<MetaAdSet>(
+      `${metaCampaignId}/adsets`,
+      credential.accessToken,
+      {
       fields:
         'id,name,optimization_goal,billing_event,bid_strategy,targeting,effective_status,start_time,stop_time,updated_time',
       updated_since: updatedSince,
       limit: 100,
-    });
+      },
+    );
   }
 
-  listAds(metaAccountId: string, updatedSince?: string) {
-    return this.paginate<MetaAd>(`${metaAccountId}/ads`, {
+  listAds(
+    metaAccountId: string,
+    credential: MetaAccessCredential,
+    updatedSince?: string,
+  ) {
+    return this.paginate<MetaAd>(
+      `${metaAccountId}/ads`,
+      credential.accessToken,
+      {
       fields:
         'id,name,effective_status,configured_status,preview_shareable_link,updated_time,campaign{id},adset{id},creative{id}',
       updated_since: updatedSince,
       limit: 100,
-    });
+      },
+    );
   }
 
-  async getCreative(metaCreativeId: string) {
+  async getCreative(
+    metaCreativeId: string,
+    credential: MetaAccessCredential,
+  ) {
     const fields = [
       'id',
       'name',
@@ -247,9 +329,13 @@ export class MetaAdsClient {
       'object_story_spec',
     ].join(',');
 
-    const creative = await this.request<MetaCreative>(metaCreativeId, {
-      fields,
-    });
+    const creative = await this.request<MetaCreative>(
+      metaCreativeId,
+      credential.accessToken,
+      {
+        fields,
+      },
+    );
 
     return {
       row: creative,
@@ -259,20 +345,25 @@ export class MetaAdsClient {
 
   listInsights(params: {
     metaAccountId: string;
+    credential: MetaAccessCredential;
     level: 'campaign' | 'adset' | 'ad';
     since: string;
     until: string;
   }) {
-    return this.paginate<MetaInsightRow>(`${params.metaAccountId}/insights`, {
-      level: params.level,
-      time_increment: 1,
-      time_range: JSON.stringify({
-        since: params.since,
-        until: params.until,
-      }),
-      fields:
-        'date_start,spend,impressions,reach,frequency,clicks,cpm,cpc,ctr,actions,action_values,cost_per_action_type,purchase_roas,video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,thruplays,campaign_id,adset_id,ad_id',
-      limit: 500,
-    });
+    return this.paginate<MetaInsightRow>(
+      `${params.metaAccountId}/insights`,
+      params.credential.accessToken,
+      {
+        level: params.level,
+        time_increment: 1,
+        time_range: JSON.stringify({
+          since: params.since,
+          until: params.until,
+        }),
+        fields:
+          'date_start,spend,impressions,reach,frequency,clicks,cpm,cpc,ctr,actions,action_values,cost_per_action_type,purchase_roas,video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,thruplays,campaign_id,adset_id,ad_id',
+        limit: 500,
+      },
+    );
   }
 }

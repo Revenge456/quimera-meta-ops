@@ -41,6 +41,17 @@ enum AiAnalysisLevel {
   ad
 }
 
+enum MetaConnectionProvider {
+  meta
+}
+
+enum MetaConnectionStatus {
+  active
+  expired
+  revoked
+  invalid
+}
+
 model User {
   id                                String                      @id @default(cuid())
   email                             String                      @unique
@@ -49,6 +60,7 @@ model User {
   role                              UserRole
   active                            Boolean                     @default(true)
   assignments                       ClientAssignment[]
+  metaConnectionsConnected          MetaConnection[]            @relation("MetaConnectionConnectedBy")
   strategistAnalysesGenerated       AiStrategistAnalysis[]      @relation("StrategistAnalysisGeneratedBy")
   commercialAdvisorAnalysesGenerated CommercialAdvisorAnalysis[] @relation("CommercialAdvisorAnalysisGeneratedBy")
   createdAt                         DateTime                    @default(now()) @map("created_at")
@@ -64,6 +76,7 @@ model Client {
   estado                    ClientStatus               @default(active)
   metaAdAccountIds          String[]                   @default([]) @map("meta_ad_account_ids")
   assignments               ClientAssignment[]
+  metaConnections           MetaConnection[]
   adAccounts                AdAccount[]
   syncLogs                  SyncLog[]
   strategistAnalyses        AiStrategistAnalysis[]
@@ -72,6 +85,35 @@ model Client {
   updatedAt                 DateTime                   @updatedAt @map("updated_at")
 
   @@map("clientes")
+}
+
+model MetaConnection {
+  id                   String                 @id @default(cuid())
+  clientId             String                 @map("client_id")
+  provider             MetaConnectionProvider @default(meta)
+  metaBusinessId       String?                @map("meta_business_id")
+  metaBusinessName     String?                @map("meta_business_name")
+  accessTokenEncrypted String                 @map("access_token_encrypted")
+  tokenType            String?                @map("token_type")
+  expiresAt            DateTime?              @map("expires_at")
+  status               MetaConnectionStatus   @default(invalid)
+  connectedByUserId    String?                @map("connected_by_user_id")
+  lastValidatedAt      DateTime?              @map("last_validated_at")
+  lastSyncAt           DateTime?              @map("last_sync_at")
+  metadataJson         Json?                  @map("metadata_json")
+  client               Client                 @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  connectedBy          User?                  @relation("MetaConnectionConnectedBy", fields: [connectedByUserId], references: [id], onDelete: SetNull)
+  adAccounts           AdAccount[]
+  syncLogs             SyncLog[]
+  createdAt            DateTime               @default(now()) @map("created_at")
+  updatedAt            DateTime               @updatedAt @map("updated_at")
+
+  @@index([clientId])
+  @@index([status])
+  @@index([provider])
+  @@index([connectedByUserId])
+  @@index([lastValidatedAt])
+  @@map("meta_connections")
 }
 
 model ClientAssignment {
@@ -104,6 +146,7 @@ model SystemLog {
 model SyncLog {
   id            String      @id @default(cuid())
   clienteId     String      @map("cliente_id")
+  metaConnectionId String?  @map("meta_connection_id")
   adAccountId   String?     @map("ad_account_id")
   syncType      SyncType    @map("sync_type")
   status        SyncStatus
@@ -115,9 +158,11 @@ model SyncLog {
   errorMessage  String?     @map("error_message")
   metadataJson  Json?       @map("metadata_json")
   client        Client      @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  metaConnection MetaConnection? @relation(fields: [metaConnectionId], references: [id], onDelete: SetNull)
   adAccount     AdAccount?  @relation(fields: [adAccountId], references: [id], onDelete: SetNull)
 
   @@index([clienteId])
+  @@index([metaConnectionId])
   @@index([adAccountId])
   @@index([status])
   @@index([startedAt])
@@ -127,6 +172,7 @@ model SyncLog {
 model AdAccount {
   id           String     @id @default(cuid())
   clienteId    String     @map("cliente_id")
+  metaConnectionId String? @map("meta_connection_id")
   metaAccountId String    @unique @map("meta_account_id")
   name         String
   currency     String?
@@ -136,12 +182,14 @@ model AdAccount {
   lastSyncedAt DateTime?  @map("last_synced_at")
   rawJson      Json?      @map("raw_json")
   client       Client     @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+  metaConnection MetaConnection? @relation(fields: [metaConnectionId], references: [id], onDelete: SetNull)
   campaigns    Campaign[]
   syncLogs      SyncLog[]
   createdAt    DateTime   @default(now()) @map("created_at")
   updatedAt    DateTime   @updatedAt @map("updated_at")
 
   @@index([clienteId])
+  @@index([metaConnectionId])
   @@index([status])
   @@map("ad_accounts")
 }

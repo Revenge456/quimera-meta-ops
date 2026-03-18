@@ -14,6 +14,7 @@ import { ClientsModule } from './modules/clients/clients.module';
 import { HealthModule } from './modules/health/health.module';
 import { InsightsModule } from './modules/insights/insights.module';
 import { LoggingModule } from './modules/logging/logging.module';
+import { MetaConnectionsModule } from './modules/meta-connections/meta-connections.module';
 import { PrismaModule } from './modules/prisma/prisma.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { UsersModule } from './modules/users/users.module';
@@ -26,6 +27,7 @@ import { UsersModule } from './modules/users/users.module';
     AuthModule,
     UsersModule,
     ClientsModule,
+    MetaConnectionsModule,
     AiComparisonModule,
     AiStrategistModule,
     CommercialAdvisorModule,

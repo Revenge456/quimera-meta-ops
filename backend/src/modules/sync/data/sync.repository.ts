@@ -79,6 +79,7 @@ export class SyncRepository {
 
   createSyncLog(params: {
     clienteId: string;
+    metaConnectionId?: string;
     adAccountId?: string;
     syncType: SyncType;
     metadataJson?: Prisma.InputJsonValue;
@@ -86,6 +87,7 @@ export class SyncRepository {
     return this.prisma.syncLog.create({
       data: {
         clienteId: params.clienteId,
+        metaConnectionId: params.metaConnectionId,
         adAccountId: params.adAccountId,
         syncType: params.syncType,
         status: SyncStatus.running,
@@ -97,6 +99,7 @@ export class SyncRepository {
   updateSyncLog(
     syncLogId: string,
     params: {
+      metaConnectionId?: string;
       adAccountId?: string;
       status: SyncStatus;
       rowsUpserted: number;
@@ -111,6 +114,7 @@ export class SyncRepository {
     return this.prisma.syncLog.update({
       where: { id: syncLogId },
       data: {
+        metaConnectionId: params.metaConnectionId,
         adAccountId: params.adAccountId,
         status: params.status,
         completedAt,
@@ -125,6 +129,7 @@ export class SyncRepository {
 
   async upsertAdAccount(params: {
     clienteId: string;
+    metaConnectionId?: string;
     metaAccountId: string;
     name: string;
     currency?: string;
@@ -137,6 +142,7 @@ export class SyncRepository {
       where: { metaAccountId: params.metaAccountId },
       update: {
         clienteId: params.clienteId,
+        metaConnectionId: params.metaConnectionId,
         name: params.name,
         currency: params.currency,
         timezone: params.timezone,
@@ -147,6 +153,7 @@ export class SyncRepository {
       },
       create: {
         clienteId: params.clienteId,
+        metaConnectionId: params.metaConnectionId,
         metaAccountId: params.metaAccountId,
         name: params.name,
         currency: params.currency,
@@ -332,6 +339,12 @@ export class SyncRepository {
           select: {
             id: true,
             nombre: true,
+          },
+        },
+        metaConnection: {
+          select: {
+            id: true,
+            status: true,
           },
         },
         adAccount: {

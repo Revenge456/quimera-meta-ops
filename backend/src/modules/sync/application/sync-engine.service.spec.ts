@@ -24,7 +24,6 @@ describe('SyncEngineService', () => {
   };
 
   const repository = {
-    getClientForSync: jest.fn(),
     createSyncLog: jest.fn(),
     findAdAccountByMetaId: jest.fn(),
     getLatestSuccessfulSync: jest.fn(),
@@ -56,6 +55,11 @@ describe('SyncEngineService', () => {
 
   const systemLogService = {
     log: jest.fn(),
+  };
+
+  const metaConnectionsService = {
+    resolveSyncTargetsForClient: jest.fn(),
+    touchConnectionLastSync: jest.fn(),
   };
 
   const syncLockService = {
@@ -115,9 +119,25 @@ describe('SyncEngineService', () => {
       repository as never,
       insightsRepository as never,
       metaAdsClient as never,
+      metaConnectionsService as never,
       systemLogService as never,
       syncLockService as never,
     );
+
+    metaConnectionsService.resolveSyncTargetsForClient.mockResolvedValue({
+      clientId: 'client-1',
+      clientName: 'Cliente',
+      targets: [
+        {
+          metaAdAccountId: 'act_1',
+          credential: {
+            accessToken: 'token-1',
+            source: 'client_connection',
+            connectionId: 'connection-1',
+          },
+        },
+      ],
+    });
   });
 
   it('forbids catalog sync trigger for commercial managers', async () => {
@@ -133,11 +153,11 @@ describe('SyncEngineService', () => {
   });
 
   it('fails when client has no configured meta ad accounts', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: [],
-    });
+    metaConnectionsService.resolveSyncTargetsForClient.mockRejectedValue(
+      new BadRequestException(
+        'El cliente no tiene conexion Meta activa ni meta_ad_account_ids legacy configurados',
+      ),
+    );
 
     await expect(
       service.triggerClientSync(admin, 'client-1', SyncType.initial),
@@ -145,11 +165,6 @@ describe('SyncEngineService', () => {
   });
 
   it('fails when a catalog lock already exists for the account', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     syncLockService.acquire.mockReturnValue(false);
 
     await expect(
@@ -158,11 +173,6 @@ describe('SyncEngineService', () => {
   });
 
   it('uses the previous successful sync timestamp for incremental catalog sync', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.getAdAccount.mockResolvedValue({
       apiCallsUsed: 1,
       row: { id: 'act_1', name: 'Account 1' },
@@ -185,20 +195,25 @@ describe('SyncEngineService', () => {
     );
     expect(metaAdsClient.listCampaigns).toHaveBeenCalledWith(
       'act_1',
+      {
+        accessToken: 'token-1',
+        source: 'client_connection',
+        connectionId: 'connection-1',
+      },
       '2026-03-17T10:00:00.000Z',
     );
     expect(metaAdsClient.listAds).toHaveBeenCalledWith(
       'act_1',
+      {
+        accessToken: 'token-1',
+        source: 'client_connection',
+        connectionId: 'connection-1',
+      },
       '2026-03-17T10:00:00.000Z',
     );
   });
 
   it('updates sync_log as success with useful counters for catalog sync', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.getAdAccount.mockResolvedValue({
       apiCallsUsed: 1,
       row: { id: 'act_1', name: 'Account 1' },
@@ -218,6 +233,7 @@ describe('SyncEngineService', () => {
       'sync-log-1',
       expect.objectContaining({
         adAccountId: 'account-internal-1',
+        metaConnectionId: 'connection-1',
         status: 'success',
         rowsUpserted: 1,
         apiCallsUsed: 3,
@@ -229,15 +245,13 @@ describe('SyncEngineService', () => {
         eventName: 'catalog_sync_success',
       }),
     );
+    expect(metaConnectionsService.touchConnectionLastSync).toHaveBeenCalledWith(
+      'connection-1',
+    );
     expect(syncLockService.release).toHaveBeenCalledWith('client-1:act_1');
   });
 
   it('updates sync_log as failed and releases the lock on catalog sync errors', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.getAdAccount.mockResolvedValue({
       apiCallsUsed: 1,
       row: { id: 'act_1', name: 'Account 1' },
@@ -252,6 +266,7 @@ describe('SyncEngineService', () => {
       'sync-log-1',
       expect.objectContaining({
         status: 'failed',
+        metaConnectionId: 'connection-1',
         rowsUpserted: 1,
         apiCallsUsed: 1,
         errorMessage: 'Meta exploded',
@@ -267,11 +282,6 @@ describe('SyncEngineService', () => {
   });
 
   it('uses the requested custom date range for insights sync', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.listInsights.mockResolvedValue({
       apiCallsUsed: 1,
       rows: [],
@@ -287,18 +297,33 @@ describe('SyncEngineService', () => {
 
     expect(metaAdsClient.listInsights).toHaveBeenNthCalledWith(1, {
       metaAccountId: 'act_1',
+      credential: {
+        accessToken: 'token-1',
+        source: 'client_connection',
+        connectionId: 'connection-1',
+      },
       level: 'campaign',
       since: '2026-03-01',
       until: '2026-03-10',
     });
     expect(metaAdsClient.listInsights).toHaveBeenNthCalledWith(2, {
       metaAccountId: 'act_1',
+      credential: {
+        accessToken: 'token-1',
+        source: 'client_connection',
+        connectionId: 'connection-1',
+      },
       level: 'adset',
       since: '2026-03-01',
       until: '2026-03-10',
     });
     expect(metaAdsClient.listInsights).toHaveBeenNthCalledWith(3, {
       metaAccountId: 'act_1',
+      credential: {
+        accessToken: 'token-1',
+        source: 'client_connection',
+        connectionId: 'connection-1',
+      },
       level: 'ad',
       since: '2026-03-01',
       until: '2026-03-10',
@@ -306,11 +331,6 @@ describe('SyncEngineService', () => {
   });
 
   it('uses the earliest latest entity date plus one day for incremental insights', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     insightsRepository.getLatestInsightDatesByAdAccount.mockResolvedValue({
       campaign: new Date('2026-03-15T00:00:00.000Z'),
       adSet: new Date('2026-03-13T00:00:00.000Z'),
@@ -339,11 +359,6 @@ describe('SyncEngineService', () => {
   });
 
   it('does not re-sync the latest stored border date for incremental insights', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     insightsRepository.getLatestInsightDatesByAdAccount.mockResolvedValue({
       campaign: new Date('2026-03-16T00:00:00.000Z'),
       adSet: new Date('2026-03-16T00:00:00.000Z'),
@@ -372,11 +387,6 @@ describe('SyncEngineService', () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2026-03-17T12:00:00.000Z'));
 
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     insightsRepository.getLatestInsightDatesByAdAccount.mockResolvedValue({
       campaign: null,
       adSet: null,
@@ -395,6 +405,11 @@ describe('SyncEngineService', () => {
 
     expect(metaAdsClient.listInsights).toHaveBeenNthCalledWith(1, {
       metaAccountId: 'act_1',
+      credential: {
+        accessToken: 'token-1',
+        source: 'client_connection',
+        connectionId: 'connection-1',
+      },
       level: 'campaign',
       since: '2026-02-15',
       until: '2026-03-17',
@@ -404,11 +419,6 @@ describe('SyncEngineService', () => {
   });
 
   it('persists daily insights idempotently and logs success', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.listInsights
       .mockResolvedValueOnce({
         apiCallsUsed: 1,
@@ -494,6 +504,7 @@ describe('SyncEngineService', () => {
       'sync-log-1',
       expect.objectContaining({
         adAccountId: 'account-internal-1',
+        metaConnectionId: 'connection-1',
         status: 'success',
         rowsUpserted: 3,
         apiCallsUsed: 3,
@@ -501,6 +512,8 @@ describe('SyncEngineService', () => {
           scope: 'insights_daily',
           since: '2026-03-16',
           until: '2026-03-16',
+          credentialSource: 'client_connection',
+          connectionId: 'connection-1',
         }),
       }),
     );
@@ -510,6 +523,9 @@ describe('SyncEngineService', () => {
       }),
     );
     expect(syncLockService.release).toHaveBeenCalledWith('insights:client-1:act_1');
+    expect(metaConnectionsService.touchConnectionLastSync).toHaveBeenCalledWith(
+      'connection-1',
+    );
     expect(result).toEqual(
       expect.objectContaining({
         clientId: 'client-1',
@@ -519,11 +535,6 @@ describe('SyncEngineService', () => {
   });
 
   it('derives purchase as result type when no lead action exists', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.listInsights
       .mockResolvedValueOnce({
         apiCallsUsed: 1,
@@ -558,11 +569,6 @@ describe('SyncEngineService', () => {
   });
 
   it('derives link_click as fallback result type when no lead or purchase exists', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.listInsights
       .mockResolvedValueOnce({
         apiCallsUsed: 1,
@@ -597,11 +603,6 @@ describe('SyncEngineService', () => {
   });
 
   it('logs skipped insight rows when local entities are missing', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.listInsights
       .mockResolvedValueOnce({
         apiCallsUsed: 1,
@@ -678,11 +679,6 @@ describe('SyncEngineService', () => {
   });
 
   it('marks insights sync as failed and releases the lock on errors', async () => {
-    repository.getClientForSync.mockResolvedValue({
-      id: 'client-1',
-      nombre: 'Cliente',
-      metaAdAccountIds: ['act_1'],
-    });
     metaAdsClient.listInsights.mockRejectedValue(new Error('Insights exploded'));
 
     await expect(
@@ -699,6 +695,7 @@ describe('SyncEngineService', () => {
       'sync-log-1',
       expect.objectContaining({
         status: 'failed',
+        metaConnectionId: 'connection-1',
         rowsUpserted: 0,
         apiCallsUsed: 0,
         errorMessage: 'Insights exploded',
@@ -713,5 +710,51 @@ describe('SyncEngineService', () => {
       }),
     );
     expect(syncLockService.release).toHaveBeenCalledWith('insights:client-1:act_1');
+  });
+
+  it('supports legacy global fallback credentials when resolving sync targets', async () => {
+    metaConnectionsService.resolveSyncTargetsForClient.mockResolvedValue({
+      clientId: 'client-1',
+      clientName: 'Cliente',
+      targets: [
+        {
+          metaAdAccountId: 'act_legacy',
+          credential: {
+            accessToken: 'fallback-token',
+            source: 'global_fallback',
+          },
+        },
+      ],
+    });
+    metaAdsClient.getAdAccount.mockResolvedValue({
+      apiCallsUsed: 1,
+      row: { id: 'act_legacy', name: 'Legacy Account' },
+    });
+    metaAdsClient.listCampaigns.mockResolvedValue({
+      apiCallsUsed: 1,
+      rows: [],
+    });
+    metaAdsClient.listAds.mockResolvedValue({
+      apiCallsUsed: 1,
+      rows: [],
+    });
+
+    await service.triggerClientSync(admin, 'client-1', SyncType.initial);
+
+    expect(metaAdsClient.getAdAccount).toHaveBeenCalledWith('act_legacy', {
+      accessToken: 'fallback-token',
+      source: 'global_fallback',
+    });
+    expect(repository.updateSyncLog).toHaveBeenCalledWith(
+      'sync-log-1',
+      expect.objectContaining({
+        metaConnectionId: undefined,
+        metadataJson: expect.objectContaining({
+          credentialSource: 'global_fallback',
+          connectionId: undefined,
+        }),
+      }),
+    );
+    expect(metaConnectionsService.touchConnectionLastSync).not.toHaveBeenCalled();
   });
 });
