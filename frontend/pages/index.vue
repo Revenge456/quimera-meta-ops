@@ -202,6 +202,9 @@ const listKey = computed(() => JSON.stringify({ endpoint: currentEndpoint.value,
 const { data: clients } = await useAsyncData<ClientOption[]>(
   'ads-manager-clients',
   () => api('/clients'),
+  {
+    lazy: true,
+  },
 );
 
 const {
@@ -216,6 +219,7 @@ const {
     }),
   {
     watch: [listKey],
+    lazy: true,
     default: () => ({
       data: [],
       meta: {
@@ -257,6 +261,7 @@ const { data: selectedDetail } = await useAsyncData<any | null>(
       : null,
   {
     watch: [detailKey],
+    lazy: true,
     default: () => null,
   },
 );
@@ -274,6 +279,7 @@ const { data: chart } = await useAsyncData<any | null>(
       : null,
   {
     watch: [detailKey],
+    lazy: true,
     default: () => null,
   },
 );
@@ -317,6 +323,7 @@ const {
         },
   {
     watch: [strategistHistoryQuery],
+    lazy: true,
     default: () => ({
       data: [],
       meta: {
@@ -370,6 +377,7 @@ const {
         },
   {
     watch: [advisorHistoryQuery],
+    lazy: true,
     default: () => ({
       data: [],
       meta: {
